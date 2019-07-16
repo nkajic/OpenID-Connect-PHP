@@ -180,6 +180,11 @@ class OpenIDConnectClient
     private $registrationParams = array();
 
     /**
+     * @var null|string See authenticateWithLocalSessionID() method
+     */
+    private $clientSessionID = null;
+
+    /**
      * @var mixed holds well-known openid server properties
      */
     private $wellKnown = false;
@@ -409,7 +414,26 @@ class OpenIDConnectClient
     }
 
     /**
-     * It calls the end-session endpoint of the OpenID Connect provider to notify the OpenID
+     * Extends authenticate method used for Single Log-Out
+     *
+     * Sets clientSessionId which is sent to token_endpoint inside requestTokens (client_session_state)
+     * You do not have to send actual clients session id, but some other unique ID.
+     * You need to be able later to get clients session by that id so you can break client session on SLO
+     * @param $clientSessionId Clients sessions identifier used for breaking session later
+     * @return bool direct result of $this->authenticate()
+     * @throws OpenIDConnectClientException
+     */
+    public function authenticateWithLocalSessionID($clientSessionId) {
+        $this->clientSessionID = $clientSessionId;
+        return $this->authenticate();
+    }
+
+    private function getClientSessionID() {
+        return $this->clientSessionID;
+    }
+
+    /**
+     * Using redirect it calls the end-session endpoint of the OpenID Connect provider to notify the OpenID
      * Connect provider that the end-user has logged out of the relying party site
      * (the client application).
      *
@@ -435,6 +459,37 @@ class OpenIDConnectClient
 
         $signout_endpoint  .= (strpos($signout_endpoint, '?') === false ? '?' : '&') . http_build_query( $signout_params, null, '&', $this->enc_type);
         $this->redirect($signout_endpoint);
+    }
+
+
+    public function getLogoutRequestData() {
+        $jwt = file_get_contents('php://input');
+        $this->verifyJWTsignature($jwt);
+        return $this->decodeJWT($jwt, 1);
+    }
+
+    /**
+     * Using API request it calls the end-session endpoint of the OpenID Connect provider to notify the OpenID
+     * Connect provider that the end-user has logged out of the relying party site
+     * (the client application).
+     *
+     * @param $refreshToken Refresh token (obtained at login)
+     */
+    public function signOutAPI($refreshToken) {
+        $signout_endpoint = $this->getProviderConfigValue("end_session_endpoint");
+
+        $schema = 'openid';
+        $signout_endpoint .= "?schema=" . $schema;
+
+        $requestHeaders = [
+            'Authorization: Basic ' . base64_encode($this->getClientID() . ':' . $this->getClientSecret()),
+            'Content-Type: application/x-www-form-urlencoded',
+            'Username: ' . $this->getClientID()
+        ];
+
+        $postParams = 'refresh_token='.$refreshToken;
+
+        $this->fetchURL($signout_endpoint, $postParams, $requestHeaders);
     }
 
     /**
@@ -710,6 +765,14 @@ class OpenIDConnectClient
             'client_id' => $this->clientID,
             'client_secret' => $this->clientSecret
         );
+
+        /* Add additional data used later for Single Log-Out */
+        if (!is_null($this->getClientSessionID())) {
+            $token_params = array_merge($token_params, array(
+                'client_session_state' => $this->getClientSessionID(),
+                'client_session_host' => gethostname()
+            ));
+        }
 
         # Consider Basic authentication if provider config is set this way
         if (in_array('client_secret_basic', $token_endpoint_auth_methods_supported, true)) {
