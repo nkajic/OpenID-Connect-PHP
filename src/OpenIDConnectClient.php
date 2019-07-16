@@ -461,7 +461,13 @@ class OpenIDConnectClient
         $this->redirect($signout_endpoint);
     }
 
-
+    /**
+     * Decode /k_logout request, throw exception if validation fails
+     * Added for better KeyCloak SLO support
+     *
+     * @throws OpenIDConnectClientException
+     * @return object
+     */
     public function getLogoutRequestData() {
         $jwt = file_get_contents('php://input');
         $this->verifyJWTsignature($jwt);
@@ -770,7 +776,7 @@ class OpenIDConnectClient
         if (!is_null($this->getClientSessionID())) {
             $token_params = array_merge($token_params, array(
                 'client_session_state' => $this->getClientSessionID(),
-                'client_session_host' => gethostname()
+                'client_session_host' => $_SERVER['SERVER_NAME']
             ));
         }
 
