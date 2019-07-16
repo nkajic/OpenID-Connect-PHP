@@ -414,6 +414,91 @@ class OpenIDConnectClient
     }
 
     /**
+     * @return bool
+     * @throws OpenIDConnectClientException
+     */
+    public function registration() {
+
+        // Do a preemptive check to see if the provider has thrown an error from a previous redirect
+        if (isset($_REQUEST['error'])) {
+            $desc = isset($_REQUEST['error_description']) ? " Description: " . $_REQUEST['error_description'] : "";
+            throw new OpenIDConnectClientException("Error: " . $_REQUEST['error'] .$desc);
+        }
+
+        // If we have an registration code then proceed to request a token
+        if (isset($_REQUEST["code"])) {
+
+            $code = $_REQUEST["code"];
+            $token_json = $this->requestTokens($code);
+
+            // Throw an error if the server returns one
+            if (isset($token_json->error)) {
+                if (isset($token_json->error_description)) {
+                    throw new OpenIDConnectClientException($token_json->error_description);
+                }
+                throw new OpenIDConnectClientException('Got response: ' . $token_json->error);
+            }
+
+            // Do an OpenID Connect session check
+            if ($_REQUEST['state'] != $this->getState()) {
+                throw new OpenIDConnectClientException("Unable to determine state");
+            }
+
+            // Cleanup state
+            $this->unsetState();
+
+            if (!property_exists($token_json, 'id_token')) {
+                throw new OpenIDConnectClientException("User did not authorize openid scope.");
+            }
+
+            $claims = $this->decodeJWT($token_json->id_token, 1);
+
+            // Verify the signature
+            if ($this->canVerifySignatures()) {
+                if (!$this->getProviderConfigValue('jwks_uri')) {
+                    throw new OpenIDConnectClientException ("Unable to verify signature due to no jwks_uri being defined");
+                }
+                if (!$this->verifyJWTsignature($token_json->id_token)) {
+                    throw new OpenIDConnectClientException ("Unable to verify signature");
+                }
+            } else {
+                user_error("Warning: JWT signature verification unavailable.");
+            }
+
+            // If this is a valid claim
+            if ($this->verifyJWTclaims($claims, $token_json->access_token)) {
+
+                // Clean up the session a little
+                $this->unsetNonce();
+
+                // Save the full response
+                $this->tokenResponse = $token_json;
+
+                // Save the id token
+                $this->idToken = $token_json->id_token;
+
+                // Save the access token
+                $this->accessToken = $token_json->access_token;
+
+                // Save the refresh token, if we got one
+                if (isset($token_json->refresh_token)) $this->refreshToken = $token_json->refresh_token;
+
+                // Success!
+                return true;
+
+            } else {
+                throw new OpenIDConnectClientException ("Unable to verify JWT claims");
+            }
+
+        } else {
+
+            $this->requestRegistration();
+            return false;
+        }
+
+    }
+
+    /**
      * Extends authenticate method used for Single Log-Out
      *
      * Sets clientSessionId which is sent to token_endpoint inside requestTokens (client_session_state)
@@ -638,6 +723,29 @@ class OpenIDConnectClient
     }
 
     /**
+     * Usualy protocol://domain/auth/realms/{realm}/protocol/openid-connect/registrations
+     * @param $url Sets redirect URL for registration
+     */
+    public function setRegistrationURL ($url) {
+        if (filter_var($url, FILTER_VALIDATE_URL) !== false) {
+            $this->registrationURL = $url;
+        }
+    }
+
+    /**
+     * Gets the URL of the registration page, encodes, and returns it
+     *
+     * @return string
+     */
+    public function getRegistrationURL() {
+
+        // If the registration URL has been set then return it.
+        if (property_exists($this, 'registrationURL') && $this->registrationURL) {
+            return $this->registrationURL;
+        }
+    }
+
+    /**
      * Used for arbitrary value generation for nonces and state
      *
      * @return string
@@ -685,6 +793,46 @@ class OpenIDConnectClient
         $auth_endpoint .= (strpos($auth_endpoint, '?') === false ? '?' : '&') . http_build_query($auth_params, null, '&', $this->enc_type);
 
         $this->commitSession();
+        $this->redirect($auth_endpoint);
+    }
+
+    /**
+     * Start Here
+     * @return void
+     */
+    public function requestRegistration() {
+        $auth_endpoint = $this->getRegistrationURL();
+        $response_type = "code";
+
+        // Generate and store a nonce in the session
+        // The nonce is an arbitrary value
+        $nonce = $this->setNonce($this->generateRandString());
+
+        // State essentially acts as a session key for OIDC
+        $state = $this->setState($this->generateRandString());
+
+        $auth_params = array_merge($this->authParams, array(
+            'response_type' => $response_type,
+            'redirect_uri' => $this->getRedirectURL(),
+            'client_id' => $this->clientID,
+            'nonce' => $nonce,
+            'state' => $state,
+            'scope' => 'openid'
+        ));
+
+        // If the client has been registered with additional scopes
+        if (sizeof($this->scopes) > 0) {
+            $auth_params = array_merge($auth_params, array('scope' => implode(' ', $this->scopes)));
+        }
+
+        // If the client has been registered with additional response types
+        if (sizeof($this->responseTypes) > 0) {
+            $auth_params = array_merge($auth_params, array('response_type' => implode(' ', $this->responseTypes)));
+        }
+
+        $auth_endpoint .= (strpos($auth_endpoint, '?') === false ? '?' : '&') . http_build_query($auth_params, null, '&');
+
+        session_commit();
         $this->redirect($auth_endpoint);
     }
 
